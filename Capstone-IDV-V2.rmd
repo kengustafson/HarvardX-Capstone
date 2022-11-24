@@ -1,0 +1,201 @@
+---
+title: "Capstone - IDV"
+author : Ken Gustafson
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+  html_document:
+    df_print: paged
+---
+# Introduction
+
+The data chosen for this project comes from the R package https://rdrr.io/github/jdmR-packages/czerlinski1999/ . It was collected by Christopher Bingham for the American Almanac of 1974 with the intent to study fuel consumption. The data set contains 48 observations with 9 variables. The goal for this project is to predict fuel consumption. Model assumptions will be checked to see if they are being violated or not in order to assess the validity of the model.
+
+# Data Exploration
+
+The response variable will be $fuel_{pc}$ which is the number of gallons consumed per person. Since there are two variables measuring fuel, the one measuring the total fuel consumption per state will be removed. 
+
+The variables under consideration for analysis with their description is the following:
+\begin{itemize}
+    \item $state$ =  State Name
+    \item $pop$ = Population
+    \item $tax$ = Motor fuel tax rate, in cents per gallon
+    \item $lic_n$ = Number of licensed drivers in thousands
+    \item $income$ = Per capita income in thousands of dollars
+    \item $road$ = Thousands of miles of federal highways
+    \item $prop_{lic}$ = Proportion of population that are licensed
+    \item $fuel_{pc}$ = Number of gallons of fuel consumed per person
+\end{itemize}
+
+Since the number of state categories are unique for each data point, it cannot be used in the analysis. After plotting each variable against one another it was found that the variables that give the population and the number of registered drivers are highly correlated ($r > .99$). The population variable will be dropped during modeling since the number of registered drivers will mostly affect fuel consumption. 
+
+
+```{R,message=FALSE,warning=FALSE}
+# Obtaining the Data
+#remotes::install_github("jdmR-packages/czerlinski1999")
+if (!require(remotes)) install.packages('remotes')
+library(remotes)
+if (!require(czerlinski1999)) install.packages('czerlinski1999')
+library("czerlinski1999")
+if (!require(glmnet)) install.packages('glmnet')
+library(tidyverse)
+library(caret)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tinytex)
+
+data("fuel")
+head(fuel)
+
+# Dropping redundant response variable
+fuel <- fuel[,-7]
+
+# Creating Pairs Plot
+pairs(fuel[,c(2,3,4,5,6,7,8)])
+```
+Looking at the pairs plot, which plots each variable against one another, there is evidence that there are outliers present in the data set that could potentially be dropped. 
+
+A new variable we will look at is fuel_tax_income, which represents the percentage of income that is spent on fuel taxes per person. We will examine how this varies by state. 
+
+```{R}
+# Defining the new variable
+fuel$fuel_tax_income <- fuel$fuel_pc * (fuel$tax/100) / (1000*fuel$income)
+
+head(arrange(fuel, fuel$fuel_tax_income))
+tail(arrange(fuel, fuel$fuel_tax_income))
+
+```
+
+Looking at the percent of income spend on fuel tax, we see that people in the northeastern states spend a lower percentage of their income on fuel taxes. This could be from the availability of mass transit as the fuel per person is less. On the other end, more rural states spend higher amounts of income on fuel tax, likely due to lower per capita incomes there.
+
+## Clustering
+We will explore if any clusters are evident in the data.
+Below is a visual that shows two clusters where states that have large populations tend to spend less on fuel taxes, while states with lower populations spend more. 
+
+```{R}
+fuelmatrix <- as.matrix(fuel[,c(2,9)])
+k <- kmeans(fuelmatrix, centers = 2, nstart = 25)
+plot(fuelmatrix,col=k$cluster+1,main = "K-Means Clustering Results with K=2",xlab = "Population",ylab = "Income Spent on Fuel Taxes")
+
+```
+## Outliers
+
+Checking for outliers, Texas was identified as the biggest continental state but does not have the population to match it. Another outlier is California which has extreme values in the x direction. This can cause the state to affect the regression line much more strongly than other states. Both states were removed from the data set.
+
+```{R}
+# Dropping Texas and California
+fuel <- fuel[-c(37,48),]
+fuel
+```
+
+# Modeling
+
+## Multiple Linear Regression
+
+First the data will be divided into a training and validation set where the validation set comprises 20% of the fuel data set. Each model will get trained on the training set. The two models under consideration will be a multiple linear regression model (along with a reduced version) and a penalized least squares model (Regularization). Specifically, a ridge regression model will be used which limits the sum of the squares of the beta coefficients.
+
+```{R message=FALSE, warning=FALSE}
+# Validation set will be 20% of fuel data
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = fuel$fuel_pc, times = 1, p = 0.2, list = FALSE)
+trainset <- fuel[-test_index,]
+temp <- fuel[test_index,]
+validation <- temp
+
+removed <- anti_join(temp, validation)
+trainset <- rbind(trainset, removed)
+
+# Cross Validation function
+rmse <- function(realfuel,predictedfuel){
+  dif <- sqrt(mean((realfuel - predictedfuel)^2))
+  return(dif)
+}
+
+```
+
+```{R}
+# Full Model
+lm1 <- lm(fuel_pc ~ ( tax + lic_n + income + road + lic_pc),data=trainset)
+summary(lm1)
+
+# Reduced Model
+lmred <- lm(fuel_pc ~ ( tax + income + lic_pc),data=trainset)
+summary(lmred)
+
+
+# Cross Validation statistic for Multiple Linear Regression Model
+pred <- predict(lmred,newdata = validation) 
+rmse(validation$fuel_pc,pred)
+```
+
+As an initial model, a first order regression model was fit using all the remaining predictor variables. The full model is $fuel_{pc} = tax + lic_{n} + income + road + prop_{lic}$.
+
+
+```{R}
+# Residual Plot
+plot(fitted(lmred),lmred$residuals,xlab = "Fitted Values",ylab = "Residuals",main = "Residual VS Fitted Plot")
+abline(0,0)
+
+```
+
+Looking at the summary of the model, the variables that were not significant at the level $\alpha = .1$ were $road$ and $lic_{n}$. Therefore the variables were dropped for a reduced model. Thus the reduced model is now $fuel_{pc} = tax + income + prop_{lic}$. Checking the constant variance assumption, the residual plot above showed that the residuals have equal variance across the x values as there are no patterns and the points are sufficiently evenly spread out. Checking the normality assumption, the plot below shows that the Q-Q plot has approximately a straight line with only one observation outside the norm, so it isn't violated too badly. Thus, we conclude that the model assumptions for multiple linear regression are satisfied. The cross validation statistic for the reduced model is 57.4. We will compare this to the regularization model below. 
+
+```{R}
+# QQ-norm plot
+qqnorm(lmred$residuals,main = "Q-Q Plot for Reduced Model")
+
+```
+
+## Regularization
+
+As an alternative model we used a penalized least squares model. Ridge regression is the method we chose to use for this modeling technique. Checking for lambda values that are between 0 and 100, the optimal lambda value was found to be approximately 12.58. 
+
+```{R}
+# Optimal Lambda Search
+lambda_seq <- 10^seq(2, -2, by = -.01)
+x <- data.matrix(trainset[,3:7])
+y <- data.matrix(trainset[,8])
+
+lm2 <- cv.glmnet(x, y, alpha = 0, lambda = lambda_seq)
+
+# Optimal Value of Lambda
+lm2$lambda.min
+
+# Create Model With Optimal Lambda Value
+lm3 <- glmnet(x, y, alpha = 0, lambda = 12.58)
+
+```
+
+To check how well the reduced and the regularization model perform they were run on the validation set. The calculated root mean squared error was 57.4 for the reduced multiple linear regression model and 50.6 for the regularization model. Thus the regularization model made more accurate predictions than the reduced model. In conclusion, when using the regularization model you can expect to be off by about 50.6 gallons when predicting fuel consumption for someone in a specific state. 
+
+
+
+```{R}
+# Regularization Model Predictions
+lmridgepred <- lm3$a0 + lm3$beta[1]*validation$tax + lm3$beta[2]*validation$lic_n + lm3$beta[3]*validation$income + lm3$beta[4]*validation$road +lm3$beta[5]*validation$lic_pc
+
+# Cross Validation statistic for Regularization Model
+rmse(validation$fuel_pc,lmridgepred)
+
+```
+
+# Results
+
+| Model  | RMSE Using Validation Set  |
+| ------|------|------|
+| Full Model      | 51.5 |
+|   Reduced Model     | 57.4 |
+|   Regularization Model       | 50.6 |
+
+
+# Conclusion
+
+By looking a the signs of each beta coefficient that was estimated by the reduced model, it indicates that as the proportion of licensed drivers increases, then fuel consumption will also increase. Conversely, it indicates that as taxes increase and when income increases it will decrease fuel consumption for the state. 
+
+In conclusion, the variables that have an effect on fuel consumption per state are $tax$, $income$, and $prop_{lic}$. The variables $road$ and $lic_{n}$ did not have a discernible effect on fuel consumption. The regularization model performed better than the reduced multiple linear regression model and on average its predictions were better by 7 gallons. A limitation of this analysis is that prediction is generally poor as there are few data points. A future direction is to use multiple years in order to predict fuel consumption for future years. 
+
